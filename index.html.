@@ -1,0 +1,381 @@
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Deriv Digit Signal Bot V1</title>
+<style>
+*{box-sizing:border-box}
+body{margin:0;background:#0b1020;color:#edf2ff;
+font:15px Arial,sans-serif;padding:16px}
+main{max-width:760px;margin:auto}
+h1{font-size:25px;margin:8px 0}
+p{color:#aab6d3;line-height:1.5}
+.card{background:#151d32;border:1px solid #293652;
+border-radius:14px;padding:16px;margin:14px 0}
+label{display:block;margin:12px 0 6px;color:#cbd5ee}
+select,button{width:100%;padding:12px;border-radius:9px;
+border:1px solid #354461;background:#202c45;color:white;
+font-size:15px}
+button{background:#2563eb;border:0;font-weight:bold;
+margin-top:10px}
+button:disabled{opacity:.5}
+.row{display:grid;grid-template-columns:1fr 1fr;gap:10px}
+.value{font-size:25px;font-weight:bold;margin-top:8px;
+overflow-wrap:anywhere}
+.muted{color:#aab6d3;font-size:13px}
+.good{color:#4ade80}.bad{color:#f87171}
+.pill{display:inline-block;padding:6px 10px;
+border-radius:20px;background:#293652;font-size:12px}
+.digits{display:flex;flex-wrap:wrap;gap:6px;margin-top:12px}
+.digit{background:#273550;border-radius:7px;padding:8px 10px}
+.signal{border-left:4px solid #60a5fa;padding:10px;
+margin:12px 0;background:#10182a;border-radius:5px}
+.signal h3{margin:5px 0}
+.smallbtn{width:auto;margin:6px 6px 0 0;padding:8px 12px}
+hr{border:0;border-top:1px solid #293652;margin:14px 0}
+</style>
+</head>
+<body>
+<main>
+<h1>Deriv Digit Signal Bot</h1>
+<p>V1 · Live ticks · Matches/Differs · Over/Under</p>
+
+<div class="card">
+  <span class="pill" id="status">Disconnected</span>
+  <label for="market">Select a market</label>
+  <select id="market">
+    <option value="1HZ10V">Volatility 10 (1s)</option>
+    <option value="1HZ25V">Volatility 25 (1s)</option>
+    <option value="1HZ50V">Volatility 50 (1s)</option>
+    <option value="1HZ75V">Volatility 75 (1s)</option>
+    <option value="1HZ100V" selected>Volatility 100 (1s)</option>
+    <option value="R_10">Volatility 10</option>
+    <option value="R_25">Volatility 25</option>
+    <option value="R_50">Volatility 50</option>
+    <option value="R_75">Volatility 75</option>
+    <option value="R_100">Volatility 100</option>
+  </select>
+  <button id="connect">Connect to Deriv</button>
+  <p class="muted" id="message">Not connected yet.</p>
+</div>
+
+<div class="row">
+  <div class="card">
+    <div class="muted">Latest price</div>
+    <div class="value" id="price">—</div>
+  </div>
+  <div class="card">
+    <div class="muted">Last digit</div>
+    <div class="value" id="lastDigit">—</div>
+  </div>
+</div>
+
+<div class="card">
+  <h3>Recent last digits</h3>
+  <div class="muted">Waiting for market ticks...</div>
+  <div class="digits" id="digits"></div>
+</div>
+
+<div class="card">
+  <h2>Signal analysis</h2>
+  <p class="muted">
+    Experimental frequency-based rules. Signals are not proven
+    predictions and may have no statistical edge.
+  </p>
+  <div id="analysis">Collecting market data...</div>
+</div>
+
+<div class="card">
+  <h2>Signal history</h2>
+  <div class="row">
+    <div>
+      <div class="muted">Recorded wins</div>
+      <div class="value good" id="wins">0</div>
+    </div>
+    <div>
+      <div class="muted">Recorded losses</div>
+      <div class="value bad" id="losses">0</div>
+    </div>
+  </div>
+  <p id="rate">No results recorded yet.</p>
+  <button id="clearHistory">Clear saved history</button>
+  <div id="history"></div>
+</div>
+
+<p class="muted">
+Signals only. No account login, trade execution, or real-money
+orders. Results are manually recorded and are not independently
+verified trading outcomes.
+</p>
+</main>
+
+<script>
+const $ = id => document.getElementById(id);
+let ws = null;
+let ticks = [];
+let digits = [];
+let lastSignalKey = "";
+let reconnectTimer = null;
+let manuallyStopped = true;
+
+function status(text) {
+  $("status").textContent = text;
+}
+
+function getDigit(quote, pipSize) {
+  const formatted = Number(quote).toFixed(
+    Math.min(Math.max(Number(pipSize) || 2, 0), 8)
+  );
+  const match = formatted.match(/(\d)$/);
+  return match ? Number(match[1]) : null;
+}
+
+function renderDigits() {
+  $("digits").innerHTML = digits.slice(-30).reverse()
+    .map(d => `<span class="digit">${d}</span>`).join("");
+}
+
+function saveHistory(items) {
+  localStorage.setItem("derivSignalHistoryV1",
+    JSON.stringify(items));
+}
+
+function loadHistory() {
+  try {
+    return JSON.parse(
+      localStorage.getItem("derivSignalHistoryV1") || "[]"
+    );
+  } catch {
+    return [];
+  }
+}
+
+function recordResult(index, result) {
+  const items = loadHistory();
+  if (!items[index] || items[index].result) return;
+  items[index].result = result;
+  saveHistory(items);
+  renderHistory();
+}
+
+function renderHistory() {
+  const items = loadHistory();
+  const wins = items.filter(x => x.result === "WIN").length;
+  const losses = items.filter(x => x.result === "LOSS").length;
+  const total = wins + losses;
+  $("wins").textContent = wins;
+  $("losses").textContent = losses;
+  $("rate").textContent = total
+    ? `Manually recorded win rate: ${(100*wins/total).toFixed(1)}% (${total} graded signals)`
+    : "No results recorded yet.";
+  $("history").innerHTML = items.slice(-15).reverse().map(x => {
+    const index = items.indexOf(x);
+    return `<div class="signal">
+      <strong>${x.type}</strong> · ${x.signal}
+      <div class="muted">${x.time}</div>
+      <div class="muted">${x.result || "Not graded"}</div>
+      ${x.result ? "" :
+        `<button class="smallbtn" data-i="${index}" data-r="WIN">Mark win</button>
+         <button class="smallbtn" data-i="${index}" data-r="LOSS">Mark loss</button>`}
+    </div>`;
+  }).join("");
+  $("history").querySelectorAll("button").forEach(btn => {
+    btn.onclick = () => recordResult(Number(btn.dataset.i), btn.dataset.r);
+  });
+}
+
+function createSignal(type, signal, reason, key) {
+  if (key === lastSignalKey) return;
+  lastSignalKey = key;
+  const items = loadHistory();
+  items.push({
+    type, signal, reason,
+    time: new Date().toLocaleString(),
+    result: ""
+  });
+  saveHistory(items.slice(-100));
+  renderHistory();
+}
+
+function analyse() {
+  if (digits.length < 30) {
+    $("analysis").textContent =
+      `Collecting digits: ${digits.length}/30`;
+    return;
+  }
+
+  const sample = digits.slice(-50);
+  const counts = Array(10).fill(0);
+  sample.forEach(d => counts[d]++);
+  const low = sample.filter(d => d <= 4).length;
+  const high = sample.length - low;
+  const maxCount = Math.max(...counts);
+  const mostFrequent = counts.indexOf(maxCount);
+  const last = sample[sample.length - 1];
+  const lastCount = counts[last];
+
+  let html = `<p>Sample: ${sample.length} ticks</p>
+  <p>Digits 0–4: ${low}/50 (${(low/50*100).toFixed(0)}%)</p>
+  <p>Digits 5–9: ${high}/50 (${(high/50*100).toFixed(0)}%)</p>
+  <p>Most frequent digit: ${mostFrequent} (${maxCount}/50)</p>`;
+
+  if (low >= 30) {
+    html += `<div class="signal"><h3>Experimental: OVER 4</h3>
+      Low digits appeared ${low}/50 times.
+      <div class="muted">Frequency rule only; not a forecast guarantee.</div></div>`;
+    createSignal("Over/Under", "OVER 4",
+      `${low}/50 digits were 0–4`, "over-"+ticks[ticks.length-1].epoch);
+  } else if (high >= 30) {
+    html += `<div class="signal"><h3>Experimental: UNDER 5</h3>
+      High digits appeared ${high}/50 times.
+      <div class="muted">Frequency rule only; not a forecast guarantee.</div></div>`;
+    createSignal("Over/Under", "UNDER 5",
+      `${high}/50 digits were 5–9`, "under-"+ticks[ticks.length-1].epoch);
+  } else {
+    html += `<div class="signal"><h3>No Over/Under signal</h3>
+      The frequency threshold was not reached.</div>`;
+  }
+
+  if (maxCount >= 8) {
+    html += `<div class="signal"><h3>Experimental: MATCH ${mostFrequent}</h3>
+      Digit ${mostFrequent} occurred ${maxCount}/50 times.
+      <div class="muted">Past frequency does not establish future probability.</div></div>`;
+    createSignal("Matches/Differs", "MATCH "+mostFrequent,
+      `${maxCount}/50 occurrences`, "match-"+ticks[ticks.length-1].epoch);
+  } else if (lastCount >= 5) {
+    html += `<div class="signal"><h3>Experimental: DIFFER ${last}</h3>
+      Last digit ${last} appeared ${lastCount}/50 times.
+      <div class="muted">This is an unverified frequency rule.</div></div>`;
+    createSignal("Matches/Differs", "DIFFER "+last,
+      `${lastCount}/50 occurrences`, "differ-"+ticks[ticks.length-1].epoch);
+  } else {
+    html += `<div class="signal"><h3>No Matches/Differs signal</h3>
+      No frequency threshold was reached.</div>`;
+  }
+
+  html += `<p class="muted">These thresholds are arbitrary research rules,
+    not evidence of an advantage. Test on unseen data before relying on them.</p>`;
+  $("analysis").innerHTML = html;
+}
+
+function disconnect() {
+  manuallyStopped = true;
+  clearTimeout(reconnectTimer);
+  if (ws) {
+    ws.onclose = null;
+    ws.close();
+    ws = null;
+  }
+  status("Disconnected");
+  $("message").textContent = "Connection stopped.";
+  $("connect").textContent = "Connect to Deriv";
+}
+
+function connect() {
+  manuallyStopped = false;
+  clearTimeout(reconnectTimer);
+  if (ws) {
+    ws.onclose = null;
+    ws.close();
+  }
+
+  status("Connecting...");
+  $("message").textContent = "Opening market data connection...";
+  $("connect").textContent = "Reconnect";
+  const symbol = $("market").value;
+  const socket = new WebSocket(
+    "wss://ws.derivws.com/websockets/v3?app_id=1089"
+  );
+  ws = socket;
+
+  socket.onopen = () => {
+    if (ws !== socket) return;
+    status("Connected");
+    $("message").textContent = "Requesting live ticks for "+symbol;
+    socket.send(JSON.stringify({
+      ticks: symbol,
+      subscribe: 1,
+      req_id: 1
+    }));
+  };
+
+  socket.onmessage = event => {
+    if (ws !== socket) return;
+    let data;
+    try { data = JSON.parse(event.data); }
+    catch { return; }
+
+    if (data.error) {
+      $("message").textContent = data.error.message;
+      return;
+    }
+
+    if (data.msg_type === "tick" && data.tick) {
+      const t = data.tick;
+      const d = getDigit(t.quote, t.pip_size);
+      if (d === null) return;
+      $("price").textContent = Number(t.quote).toFixed(
+        Math.min(Number(t.pip_size) || 2, 8)
+      );
+      $("lastDigit").textContent = d;
+      $("message").textContent = "Receiving live ticks · "+symbol;
+      ticks.push({epoch:t.epoch, quote:t.quote});
+      digits.push(d);
+      if (digits.length > 500) digits.shift();
+      if (ticks.length > 500) ticks.shift();
+      renderDigits();
+      analyse();
+    }
+  };
+
+  socket.onerror = () => {
+    if (ws === socket) {
+      status("Connection error");
+      $("message").textContent =
+        "Connection failed. Check internet and try reconnecting.";
+    }
+  };
+
+  socket.onclose = () => {
+    if (ws !== socket) return;
+    status("Disconnected");
+    $("message").textContent = "Connection closed.";
+    if (!manuallyStopped) {
+      status("Reconnecting...");
+      reconnectTimer = setTimeout(connect, 3000);
+    }
+  };
+}
+
+$("connect").onclick = () => {
+  if (ws && ws.readyState === WebSocket.OPEN) {
+    disconnect();
+  } else {
+    connect();
+  }
+};
+
+$("market").onchange = () => {
+  digits = [];
+  ticks = [];
+  lastSignalKey = "";
+  $("price").textContent = "—";
+  $("lastDigit").textContent = "—";
+  $("digits").innerHTML = "";
+  $("analysis").textContent = "Waiting for ticks...";
+  if (ws && ws.readyState === WebSocket.OPEN) connect();
+};
+
+$("clearHistory").onclick = () => {
+  if (confirm("Delete all saved signal history?")) {
+    localStorage.removeItem("derivSignalHistoryV1");
+    renderHistory();
+  }
+};
+
+renderHistory();
+</script>
+</body>
+</html>
